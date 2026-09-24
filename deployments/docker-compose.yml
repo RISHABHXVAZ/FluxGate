@@ -1,0 +1,59 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: fluxgate-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 5
+
+  backend:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile.backend
+    container_name: fluxgate-backend
+    environment:
+      - BACKEND_PORT=50051
+    ports:
+      - "50051:50051"
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile.gateway
+    container_name: fluxgate-gateway
+    environment:
+      - GATEWAY_PORT=8080
+      - REDIS_ADDR=redis:6379
+      - BACKEND_ADDR=backend:50051
+      - LUA_SCRIPT_PATH=scripts/lua/sliding_window.lua
+    ports:
+      - "8080:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_started
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: fluxgate-prometheus
+    volumes:
+      - ../monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    depends_on:
+      - gateway
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: fluxgate-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    depends_on:
+      - prometheus

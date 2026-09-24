@@ -1,0 +1,7 @@
+global:
+  scrape_interval: 2s
+
+scrape_configs:
+  - job_name: "fluxgate-gateway"
+    static_configs:
+      - targets: ["gateway:8080"]
