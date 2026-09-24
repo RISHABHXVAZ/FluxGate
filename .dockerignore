@@ -1,0 +1,33 @@
+# Version control
+.git
+.gitignore
+
+# Go build & test artifacts
+bin/
+/bin/
+dist/
+*.exe
+*.test
+*.out
+
+# IDE and Editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Operating System Files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Environment / local secret files
+.env
+.env.*
+*.pem
+*.key
+
+# Non-production assets
+docs/
+tests/

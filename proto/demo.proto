@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package demo;
+
+option go_package = "fluxgate/proto/gen";
+
+service DemoBackend {
+  rpc Echo(EchoRequest) returns (EchoResponse);
+}
+
+message EchoRequest {
+  string message = 1;
+  string request_id = 2;
+
+  // Synthetic chaos injection flags (D15)
+  int32 inject_latency_ms = 3;
+  bool inject_error = 4;
+  int32 inject_error_code = 5;
+}
+
+message EchoResponse {
+  string message = 1;
+  int64 server_timestamp_ms = 2;
+  string request_id = 3;
+}
