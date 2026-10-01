@@ -293,3 +293,17 @@ go test -v ./tests/integration/...
 ## Architecture Decisions Log
 
 For detailed technical rationale on boundary conditions, fail-closed mechanics, and design trade-offs, consult [docs/decisions.md](docs/decisions.md).
+
+---
+
+## Project Team & Contributors
+
+Academic Engineering Project — B.Tech (Computer Science & Engineering, 3rd Year):
+
+| Contributor | Registration Number | Department |
+| :--- | :---: | :--- |
+| **Raghav Gupta** | `20243226` | Computer Science & Engineering |
+| **Rishabh Srivastava** | `20243236` | Computer Science & Engineering |
+| **Rishabh Singh** | `20243235` | Computer Science & Engineering |
+| **Prince Keshari** | `20243218` | Computer Science & Engineering |
+
