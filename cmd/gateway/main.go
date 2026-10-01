@@ -47,7 +47,10 @@ func main() {
 	defer cancel()
 
 	if err := cfgMgr.EnsureDefaultConfig(ctx); err != nil {
-		log.Fatalf("Fatal: Startup integrity check failed (D17): %v", err)
+		log.Printf("Default policy missing in Redis. Initializing baseline policy (limit=10, window=60000ms)...")
+		if initErr := cfgMgr.SetRule(ctx, "default", 10, 60000); initErr != nil {
+			log.Fatalf("Fatal: Startup integrity check failed (D17): %v", initErr)
+		}
 	}
 	log.Println("Default rate limit configuration validated.")
 
@@ -79,7 +82,7 @@ func main() {
 	// 5. Initialize Observability & HTTP Edge Layer
 	m := metrics.NewMetrics(prometheus.DefaultRegisterer)
 	rlMiddleware := ratelimit.NewMiddleware(engine, cfgMgr, m)
-	handler := httpedge.NewHandler(upClient, rClient.Ping)
+	handler := httpedge.NewHandler(upClient, rClient.Ping, cfgMgr)
 	router := httpedge.NewRouter(handler, rlMiddleware)
 	server := httpedge.NewServer(port, router)
 

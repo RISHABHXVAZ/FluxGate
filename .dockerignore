@@ -6,9 +6,15 @@
 bin/
 /bin/
 dist/
+dist-ssr/
 *.exe
 *.test
 *.out
+
+# Node / Frontend artifacts
+node_modules/
+.vite/
+npm-debug.log*
 
 # IDE and Editor files
 .idea/

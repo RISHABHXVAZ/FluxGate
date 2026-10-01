@@ -15,6 +15,7 @@ FluxGate is an edge reverse-proxy and rate-limiting gateway designed for high-co
 * **Dynamic Multi-Tier Configuration ([D7](docs/decisions.md#L31))**: Per-key limit overrides stored in Redis with thread-safe, in-memory TTL caching (10s) to balance dynamic updates with sub-millisecond evaluation.
 * **Startup Integrity Gate ([D17](docs/decisions.md#L75))**: Fails fast if baseline rate-limit rules (`ratelimit:config:default`) are missing.
 * **Synthetic Chaos Injection ([D15](docs/decisions.md#L67))**: Upstream contract supports client-controlled latency and error simulation for fault-tolerance testing.
+* **Interactive Web Dashboard & Control Plane**: Modern React + Vite dashboard featuring an interactive API playground, sliding-window capacity gauge, high-concurrency burst tester, and dynamic Redis policy configurator.
 * **First-Class Observability ([D10](docs/decisions.md#L43))**: Native Prometheus metrics exporter (`/metrics`), Grafana dashboard, and Kubernetes-ready liveness (`/health`) and readiness (`/ready`) probes.
 
 ---
@@ -23,14 +24,15 @@ FluxGate is an edge reverse-proxy and rate-limiting gateway designed for high-co
 
 ```mermaid
 flowchart LR
-    Client["Client\n(HTTP/REST)"] -->|POST /api/v1/echo\nX-API-Key: ...| Gateway["FluxGate Gateway\n(:8080)"]
+    Client["Client\n(Browser / REST)"] -->|HTTP / :5173 or :8080| Gateway["FluxGate Gateway\n(:8080)"]
     
     subgraph Gateway Pipeline
+        CORS["0. CORS Middleware\n(Exposes RateLimit Headers)"]
         Auth["1. API Key Auth\n(401 if missing)"]
         Config["2. Dynamic Config\n(Redis + In-Memory Cache)"]
         Limiter["3. Atomic Rate Limiter\n(Redis Lua Script)"]
         Metrics["4. Prometheus Metrics\n(/metrics)"]
-        Auth --> Config --> Limiter --> Metrics
+        CORS --> Auth --> Config --> Limiter --> Metrics
     end
     
     Gateway --> Gateway Pipeline
@@ -68,10 +70,14 @@ FluxGate/
 ├── cmd/
 │   ├── gateway/main.go         # Gateway entrypoint & graceful shutdown coordinator
 │   └── backend/main.go         # Demo gRPC backend service with chaos simulation
+├── frontend/                   # Interactive React + Vite control plane dashboard
+│   ├── src/                    # UI components, visualizer, playground & telemetry
+│   ├── index.html              # Dashboard entrypoint
+│   └── vite.config.js          # Vite configuration with proxy to Gateway (:8080)
 ├── internal/
 │   ├── apikey/extractor.go     # X-API-Key header parsing & validation
 │   ├── config/config.go        # Dynamic Redis policy manager & local TTL cache
-│   ├── httpedge/               # HTTP router, handlers, server, and health probes
+│   ├── httpedge/               # HTTP router, CORS middleware, handlers, server, and probes
 │   ├── metrics/metrics.go      # Prometheus metrics definitions
 │   ├── ratelimit/              # Sliding window Lua engine & rate limit middleware
 │   ├── redisclient/client.go   # Connection pool, timeouts & error classifiers
@@ -82,9 +88,10 @@ FluxGate/
 ├── scripts/lua/
 │   └── sliding_window.lua      # Atomic sliding window script executed in Redis
 ├── deployments/
-│   ├── docker-compose.yml      # Multi-container orchestration (Redis, Backend, Gateway, Prometheus, Grafana)
+│   ├── docker-compose.yml      # Multi-container orchestration (Redis, Backend, Gateway, Frontend, Prometheus, Grafana)
 │   ├── Dockerfile.gateway      # Multi-stage container build for gateway
-│   └── Dockerfile.backend      # Container build for gRPC backend
+│   ├── Dockerfile.backend      # Container build for gRPC backend
+│   └── Dockerfile.frontend     # Multi-stage container build for frontend
 ├── monitoring/prometheus/      # Prometheus scrape configuration
 ├── docs/
 │   └── decisions.md            # Architecture & Design Decisions Log (D1 - D19)
@@ -101,28 +108,35 @@ FluxGate/
 
 ---
 
-### Option 1: Run with Docker Compose (Recommended)
+### 🚀 Instant 1-Command Startup (Recommended)
+
+You only need to run **one single command** in your terminal. It builds all microservices, initializes Redis rate-limit policies, starts Prometheus & Grafana, and automatically opens the interactive Web Dashboard in your browser:
+
+| Environment | Start Command | Stop Command |
+| :--- | :--- | :--- |
+| **Windows Command Prompt (CMD)** | `start.bat` | `stop.bat` |
+| **Windows PowerShell** | `.\start.ps1` | `.\stop.ps1` |
+| **Linux / macOS / WSL** | `./start.sh` | `./stop.sh` |
+
+> [!TIP]
+> Once started, the full stack is live at:
+> * **Interactive Web Dashboard**: [http://localhost:5173](http://localhost:5173) *(opens automatically)*
+> * **API Gateway Edge**: [http://localhost:8080](http://localhost:8080)
+> * **Prometheus Metrics**: [http://localhost:9090](http://localhost:9090)
+> * **Grafana Dashboards**: [http://localhost:3000](http://localhost:3000) (User/Pass: `admin`/`admin`)
+
+---
+
+### Manual Docker Compose
 
 1. **Start all services**:
    ```bash
    docker compose -f deployments/docker-compose.yml up --build -d
    ```
 
-2. **Seed the default rate-limit policy in Redis ([D17](docs/decisions.md#L75))**:
-   The gateway enforces that a baseline policy exists before serving traffic.
-   ```bash
-   docker exec -it fluxgate-redis redis-cli HSET ratelimit:config:default limit 10 window_ms 60000
-   ```
+2. **Access the Web Dashboard**:
+   Open `http://localhost:5173` in your browser.
 
-3. **Restart the gateway if it booted prior to seeding**:
-   ```bash
-   docker restart fluxgate-gateway
-   ```
-
-4. **Verify container health**:
-   ```bash
-   docker compose -f deployments/docker-compose.yml ps
-   ```
 
 ---
 
@@ -152,6 +166,14 @@ FluxGate/
    export LUA_SCRIPT_PATH=scripts/lua/sliding_window.lua
    go run ./cmd/gateway
    ```
+
+5. **Start the Frontend Dashboard (Terminal 3)**:
+   ```bash
+   cd frontend
+   npm run dev
+   ```
+   Open `http://localhost:5173` in your browser.
+
 
 ---
 

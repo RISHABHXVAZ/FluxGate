@@ -79,7 +79,7 @@ func TestGateway_CompleteHTTPFlow(t *testing.T) {
 	cfgMgr := config.NewManager(rClient, 5*time.Second)
 	m := metrics.NewMetrics(prometheus.NewRegistry())
 	rlMw := ratelimit.NewMiddleware(engine, cfgMgr, m)
-	h := httpedge.NewHandler(upClient, rClient.Ping)
+	h := httpedge.NewHandler(upClient, rClient.Ping, cfgMgr)
 	router := httpedge.NewRouter(h, rlMw)
 
 	// Test 1: Missing API key -> 401 Unauthorized (D14)

@@ -9,6 +9,8 @@ services:
       interval: 2s
       timeout: 2s
       retries: 5
+    volumes:
+      - redis-data:/data
 
   backend:
     build:
@@ -57,3 +59,17 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=admin
     depends_on:
       - prometheus
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile.frontend
+    container_name: fluxgate-frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - gateway
+
+volumes:
+  redis-data:
+

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"fluxgate/internal/config"
 	"fluxgate/internal/ratelimit"
 	"fluxgate/internal/upstream"
 )
@@ -14,12 +15,14 @@ import (
 type Handler struct {
 	upstreamClient *upstream.Client
 	pingRedis      func(ctx context.Context) error
+	cfgMgr         *config.Manager
 }
 
-func NewHandler(upstreamClient *upstream.Client, pingRedis func(ctx context.Context) error) *Handler {
+func NewHandler(upstreamClient *upstream.Client, pingRedis func(ctx context.Context) error, cfgMgr *config.Manager) *Handler {
 	return &Handler{
 		upstreamClient: upstreamClient,
 		pingRedis:      pingRedis,
+		cfgMgr:         cfgMgr,
 	}
 }
 
@@ -117,3 +120,82 @@ func (h *Handler) ReadyHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"status":"READY"}`))
 }
+
+type SetConfigRequest struct {
+	Key      string `json:"key"`
+	Limit    int    `json:"limit"`
+	WindowMs int64  `json:"window_ms"`
+}
+
+// HandleGetConfig handles GET /api/v1/config?key=...
+func (h *Handler) HandleGetConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	key := r.URL.Query().Get("key")
+	if key == "" {
+		key = "default"
+	}
+
+	rule, err := h.cfgMgr.GetRule(r.Context(), key)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"key":       key,
+		"limit":     rule.Limit,
+		"window_ms": rule.WindowMs,
+	})
+}
+
+// HandleSetConfig handles POST /api/v1/config
+func (h *Handler) HandleSetConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req SetConfigRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON payload"})
+		return
+	}
+
+	if req.Limit <= 0 || req.WindowMs <= 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "limit and window_ms must be positive"})
+		return
+	}
+
+	if req.Key == "" {
+		req.Key = "default"
+	}
+
+	if err := h.cfgMgr.SetRule(r.Context(), req.Key, req.Limit, req.WindowMs); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":    "updated",
+		"key":       req.Key,
+		"limit":     req.Limit,
+		"window_ms": req.WindowMs,
+	})
+}
+

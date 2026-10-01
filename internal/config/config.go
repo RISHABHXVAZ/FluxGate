@@ -129,3 +129,28 @@ func (m *Manager) readRuleHash(ctx context.Context, key string) (RateLimitRule, 
 
 	return RateLimitRule{Limit: limit, WindowMs: windowMs}, nil
 }
+
+// SetRule updates the rate limit rule in Redis and refreshes the in-memory cache
+func (m *Manager) SetRule(ctx context.Context, apiKey string, limit int, windowMs int64) error {
+	var key string
+	if apiKey == "" || apiKey == "default" {
+		key = "ratelimit:config:default"
+	} else {
+		key = fmt.Sprintf("ratelimit:config:%s", apiKey)
+	}
+
+	err := m.client.HSet(ctx, key, "limit", strconv.Itoa(limit), "window_ms", strconv.FormatInt(windowMs, 10))
+	if err != nil {
+		return fmt.Errorf("failed to save rule to redis: %w", err)
+	}
+
+	m.mu.Lock()
+	m.cache[apiKey] = cachedRule{
+		rule:      RateLimitRule{Limit: limit, WindowMs: windowMs},
+		expiresAt: time.Now().Add(m.cacheTTL),
+	}
+	m.mu.Unlock()
+
+	return nil
+}
+
