@@ -573,11 +573,17 @@ export default function App() {
 
       {/* Clean Footer */}
       <footer className="border-t border-white/10 bg-[#0f172a]/60 py-4 px-6 text-center text-xs text-slate-400">
-        <div className="max-w-5xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2">
-          <span>FluxGate — Academic Engineering Project</span>
-          <span className="font-mono text-slate-300">
-            Raghav Gupta • Rishabh Srivastava • Rishabh Singh • Prince Keshari
-          </span>
+        <div className="max-w-6xl mx-auto flex flex-col md:flex-row items-center justify-between gap-3">
+          <span className="font-semibold text-slate-300">FluxGate — Academic Engineering Project</span>
+          <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-slate-300 text-[11px]">
+            <span><strong className="text-white">Raghav Gupta</strong> (Frontend Dev)</span>
+            <span className="text-slate-600">•</span>
+            <span><strong className="text-white">Rishabh Srivastava</strong> (Backend Dev)</span>
+            <span className="text-slate-600">•</span>
+            <span><strong className="text-white">Rishabh Singh</strong> (Tester)</span>
+            <span className="text-slate-600">•</span>
+            <span><strong className="text-white">Prince Keshari</strong> (Researcher)</span>
+          </div>
         </div>
       </footer>
 

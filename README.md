@@ -319,10 +319,10 @@ For detailed technical rationale on boundary conditions, fail-closed mechanics, 
 
 Academic Engineering Project — B.Tech (Computer Science & Engineering, 3rd Year):
 
-| Contributor | Registration Number | Department |
-| :--- | :---: | :--- |
-| **Raghav Gupta** | `20243226` | Computer Science & Engineering |
-| **Rishabh Srivastava** | `20243236` | Computer Science & Engineering |
-| **Rishabh Singh** | `20243235` | Computer Science & Engineering |
-| **Prince Keshari** | `20243218` | Computer Science & Engineering |
+| Contributor | Registration Number | Project Role | Department |
+| :--- | :---: | :--- | :--- |
+| **Raghav Gupta** | `20243226` | **Frontend Developer** | Computer Science & Engineering |
+| **Rishabh Srivastava** | `20243236` | **Backend Developer** | Computer Science & Engineering |
+| **Rishabh Singh** | `20243235` | **QA / Tester** | Computer Science & Engineering |
+| **Prince Keshari** | `20243218` | **System Researcher** | Computer Science & Engineering |
 
