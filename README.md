@@ -24,24 +24,21 @@ FluxGate is an edge reverse-proxy and rate-limiting gateway designed for high-co
 
 ```mermaid
 flowchart LR
-    Client["Client\n(Browser / REST)"] -->|HTTP / :5173 or :8080| Gateway["FluxGate Gateway\n(:8080)"]
+    Client["Client (Browser / REST)"] -->|HTTP / :5173 or :8080| CORS["0. CORS Middleware"]
     
-    subgraph Gateway Pipeline
-        CORS["0. CORS Middleware\n(Exposes RateLimit Headers)"]
-        Auth["1. API Key Auth\n(401 if missing)"]
-        Config["2. Dynamic Config\n(Redis + In-Memory Cache)"]
-        Limiter["3. Atomic Rate Limiter\n(Redis Lua Script)"]
-        Metrics["4. Prometheus Metrics\n(/metrics)"]
-        CORS --> Auth --> Config --> Limiter --> Metrics
+    subgraph GW ["FluxGate Gateway (:8080)"]
+        CORS --> Auth["1. API Key Auth (401 if missing)"]
+        Auth --> Config["2. Dynamic Config (Redis + Local Cache)"]
+        Config --> Limiter["3. Sliding Window Rate Limiter"]
+        Limiter --> Metrics["4. Prometheus Metrics (/metrics)"]
     end
     
-    Gateway --> Gateway Pipeline
-    Limiter -.->|Sliding Window ZSET| Redis[("Redis 7\n(State Store)")]
-    Limiter -->|If Exceeded: 429\nIf Redis Down: 503| Client
+    Limiter -.->|Sliding Window ZSET| Redis[("Redis 7 (State Store)")]
+    Limiter -->|If Exceeded: 429 / If Redis Down: 503| Client
     
-    Metrics -->|gRPC DemoBackend.Echo| Backend["Upstream Backend\n(:50051)"]
-    Backend -->|gRPC Response| Gateway
-    Gateway -->|200 OK + RateLimit Headers| Client
+    Metrics -->|gRPC DemoBackend.Echo| Backend["Upstream Backend (:50051)"]
+    Backend -->|gRPC Response| Metrics
+    Metrics -->|200 OK + RateLimit Headers| Client
 ```
 
 ---
