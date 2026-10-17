@@ -80,9 +80,20 @@ func main() {
 	log.Printf("Upstream gRPC client connected to %s", backendAddr)
 
 	// 5. Initialize Observability & HTTP Edge Layer
+	upstreamTimeoutStr := os.Getenv("UPSTREAM_TIMEOUT")
+	upstreamTimeout := 2 * time.Second
+	if upstreamTimeoutStr != "" {
+		if d, err := time.ParseDuration(upstreamTimeoutStr); err == nil && d > 0 {
+			upstreamTimeout = d
+		} else {
+			log.Printf("Invalid or non-positive UPSTREAM_TIMEOUT %q, using default %v", upstreamTimeoutStr, upstreamTimeout)
+		}
+	}
+	log.Printf("Upstream request timeout configured to %v", upstreamTimeout)
+
 	m := metrics.NewMetrics(prometheus.DefaultRegisterer)
 	rlMiddleware := ratelimit.NewMiddleware(engine, cfgMgr, m)
-	handler := httpedge.NewHandler(upClient, rClient.Ping, cfgMgr)
+	handler := httpedge.NewHandler(upClient, rClient.Ping, cfgMgr, upstreamTimeout)
 	router := httpedge.NewRouter(handler, rlMiddleware)
 	server := httpedge.NewServer(port, router)
 
