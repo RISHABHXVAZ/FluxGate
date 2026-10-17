@@ -156,13 +156,30 @@ You only need to run **one single command** in your terminal. It builds all micr
    ```
 
 4. **Start the FluxGate Gateway (Terminal 2)**:
+
+   **Linux / macOS / WSL (Bash)**:
    ```bash
    export GATEWAY_PORT=8080
    export REDIS_ADDR=127.0.0.1:6379
    export BACKEND_ADDR=localhost:50051
    export LUA_SCRIPT_PATH=scripts/lua/sliding_window.lua
+   export UPSTREAM_TIMEOUT=2s
    go run ./cmd/gateway
    ```
+
+   **Windows (PowerShell)**:
+   ```powershell
+   $env:GATEWAY_PORT="8080"
+   $env:REDIS_ADDR="127.0.0.1:6379"
+   $env:BACKEND_ADDR="localhost:50051"
+   $env:LUA_SCRIPT_PATH="scripts/lua/sliding_window.lua"
+   $env:UPSTREAM_TIMEOUT="2s"
+   go run ./cmd/gateway
+   ```
+
+   > [!NOTE]
+   > `UPSTREAM_TIMEOUT` configures the maximum duration the gateway waits for an upstream gRPC response before returning HTTP `504 Gateway Timeout`. It accepts standard Go duration formats such as `2s` and `500ms`, defaulting to `2s` if unset.
+
 
 5. **Start the Frontend Dashboard (Terminal 3)**:
    ```bash

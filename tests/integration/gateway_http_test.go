@@ -256,14 +256,18 @@ func TestGateway_UpstreamTimeoutAndErrors(t *testing.T) {
 	// Subtest C: Client-Request Cancellation -> HTTP 499 & Not Misreported as 504
 	t.Run("Client Request Cancellation (499)", func(t *testing.T) {
 		clientCtx, cancel := context.WithCancel(context.Background())
-		cancel() // Client canceled request immediately
+		defer cancel()
 
 		body, _ := json.Marshal(httpedge.EchoRequestBody{
-			Message: "cancel-test",
+			Message:         "cancel-test",
+			InjectLatencyMs: 200, // In-flight upstream call
 		})
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/echo", bytes.NewReader(body)).WithContext(clientCtx)
 		req.Header.Set("X-API-Key", apiKey)
 		rec := httptest.NewRecorder()
+
+		// Cancel request while upstream call is in-flight
+		time.AfterFunc(20*time.Millisecond, cancel)
 
 		router.ServeHTTP(rec, req)
 
