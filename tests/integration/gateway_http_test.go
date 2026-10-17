@@ -21,6 +21,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type testBackend struct {
@@ -28,6 +30,16 @@ type testBackend struct {
 }
 
 func (b *testBackend) Echo(ctx context.Context, req *pb.EchoRequest) (*pb.EchoResponse, error) {
+	if req.GetInjectLatencyMs() > 0 {
+		time.Sleep(time.Duration(req.GetInjectLatencyMs()) * time.Millisecond)
+	}
+	if req.GetInjectError() {
+		code := codes.Code(req.GetInjectErrorCode())
+		if code == codes.OK {
+			code = codes.Unavailable
+		}
+		return nil, status.Errorf(code, "test backend injected error")
+	}
 	return &pb.EchoResponse{
 		Message:          req.GetMessage(),
 		ServerTimestampMs: time.Now().UnixMilli(),
@@ -79,7 +91,7 @@ func TestGateway_CompleteHTTPFlow(t *testing.T) {
 	cfgMgr := config.NewManager(rClient, 5*time.Second)
 	m := metrics.NewMetrics(prometheus.NewRegistry())
 	rlMw := ratelimit.NewMiddleware(engine, cfgMgr, m)
-	h := httpedge.NewHandler(upClient, rClient.Ping, cfgMgr)
+	h := httpedge.NewHandler(upClient, rClient.Ping, cfgMgr, 2*time.Second)
 	router := httpedge.NewRouter(h, rlMw)
 
 	// Test 1: Missing API key -> 401 Unauthorized (D14)
@@ -132,4 +144,146 @@ func TestGateway_CompleteHTTPFlow(t *testing.T) {
 	if hRec.Code != http.StatusOK {
 		t.Errorf("Expected 200 for /health, got %d", hRec.Code)
 	}
+}
+
+func TestGateway_UpstreamTimeoutAndErrors(t *testing.T) {
+	// 1. Setup Redis
+	rCfg := redisclient.DefaultConfig()
+	rClient, err := redisclient.NewClient(rCfg)
+	if err != nil {
+		t.Skipf("Redis unreachable: %v", err)
+	}
+	defer rClient.Close()
+
+	ctx := context.Background()
+	_ = rClient.HSet(ctx, "ratelimit:config:default", "limit", "100", "window_ms", "60000")
+
+	// 2. Setup mock upstream backend
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer lis.Close()
+
+	srv := grpc.NewServer()
+	pb.RegisterDemoBackendServer(srv, &testBackend{})
+	go srv.Serve(lis)
+	defer srv.Stop()
+
+	upClient, err := upstream.NewClient(lis.Addr().String())
+	if err != nil {
+		t.Fatalf("upstream client failed: %v", err)
+	}
+	defer upClient.Close()
+
+	// 3. Setup Gateway Pipeline with a tight 50ms upstream timeout
+	scriptBytes, err := os.ReadFile("../../scripts/lua/sliding_window.lua")
+	if err != nil {
+		t.Fatalf("read script failed: %v", err)
+	}
+
+	engine, err := ratelimit.NewEngine(rClient, string(scriptBytes))
+	if err != nil {
+		t.Fatalf("engine failed: %v", err)
+	}
+
+	cfgMgr := config.NewManager(rClient, 5*time.Second)
+	m := metrics.NewMetrics(prometheus.NewRegistry())
+	rlMw := ratelimit.NewMiddleware(engine, cfgMgr, m)
+
+	shortTimeout := 50 * time.Millisecond
+	h := httpedge.NewHandler(upClient, rClient.Ping, cfgMgr, shortTimeout)
+	router := httpedge.NewRouter(h, rlMw)
+
+	apiKey := "test-timeout-key"
+
+	// Subtest A: Upstream Deadline Exceeded -> HTTP 504 & UPSTREAM_TIMEOUT
+	t.Run("Upstream Deadline Exceeded (504)", func(t *testing.T) {
+		body, _ := json.Marshal(httpedge.EchoRequestBody{
+			Message:         "timeout-test",
+			InjectLatencyMs: 150, // 150ms > 50ms timeout
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/echo", bytes.NewReader(body))
+		req.Header.Set("X-API-Key", apiKey)
+		rec := httptest.NewRecorder()
+
+		router.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusGatewayTimeout {
+			t.Fatalf("Expected HTTP 504 Gateway Timeout, got %d. Body: %s", rec.Code, rec.Body.String())
+		}
+
+		var env ratelimit.ErrorEnvelope
+		if err := json.NewDecoder(rec.Body).Decode(&env); err != nil {
+			t.Fatalf("Failed to decode response JSON: %v", err)
+		}
+		if env.Error.Code != "UPSTREAM_TIMEOUT" {
+			t.Errorf("Expected error code UPSTREAM_TIMEOUT, got %q", env.Error.Code)
+		}
+		if env.Error.Message != "The upstream service timed out." {
+			t.Errorf("Unexpected error message: %q", env.Error.Message)
+		}
+	})
+
+	// Subtest B: Ordinary Upstream Failure -> HTTP 502 & UPSTREAM_UNAVAILABLE
+	t.Run("Ordinary Upstream Failure (502)", func(t *testing.T) {
+		body, _ := json.Marshal(httpedge.EchoRequestBody{
+			Message:     "failure-test",
+			InjectError: true,
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/echo", bytes.NewReader(body))
+		req.Header.Set("X-API-Key", apiKey)
+		rec := httptest.NewRecorder()
+
+		router.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadGateway {
+			t.Fatalf("Expected HTTP 502 Bad Gateway, got %d. Body: %s", rec.Code, rec.Body.String())
+		}
+
+		var env ratelimit.ErrorEnvelope
+		if err := json.NewDecoder(rec.Body).Decode(&env); err != nil {
+			t.Fatalf("Failed to decode response JSON: %v", err)
+		}
+		if env.Error.Code != "UPSTREAM_UNAVAILABLE" {
+			t.Errorf("Expected error code UPSTREAM_UNAVAILABLE, got %q", env.Error.Code)
+		}
+		if env.Error.Message != "The upstream service failed to respond." {
+			t.Errorf("Unexpected error message: %q", env.Error.Message)
+		}
+	})
+
+	// Subtest C: Client-Request Cancellation -> HTTP 499 & Not Misreported as 504
+	t.Run("Client Request Cancellation (499)", func(t *testing.T) {
+		clientCtx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		body, _ := json.Marshal(httpedge.EchoRequestBody{
+			Message:         "cancel-test",
+			InjectLatencyMs: 200, // In-flight upstream call
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/echo", bytes.NewReader(body)).WithContext(clientCtx)
+		req.Header.Set("X-API-Key", apiKey)
+		rec := httptest.NewRecorder()
+
+		// Cancel request while upstream call is in-flight
+		time.AfterFunc(20*time.Millisecond, cancel)
+
+		router.ServeHTTP(rec, req)
+
+		if rec.Code == http.StatusGatewayTimeout {
+			t.Errorf("Client cancellation must NOT be misreported as HTTP 504 Gateway Timeout")
+		}
+		if rec.Code != 499 {
+			t.Errorf("Expected HTTP 499 Client Closed Request, got %d", rec.Code)
+		}
+
+		var env ratelimit.ErrorEnvelope
+		if err := json.NewDecoder(rec.Body).Decode(&env); err != nil {
+			t.Fatalf("Failed to decode response JSON: %v", err)
+		}
+		if env.Error.Code != "CLIENT_CLOSED_REQUEST" {
+			t.Errorf("Expected error code CLIENT_CLOSED_REQUEST, got %q", env.Error.Code)
+		}
+	})
 }

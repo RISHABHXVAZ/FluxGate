@@ -9,10 +9,16 @@ import (
 	pb "fluxgate/proto/gen"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
-var ErrUpstreamUnavailable = errors.New("upstream service failed or unavailable")
+var (
+	ErrUpstreamUnavailable = errors.New("upstream service failed or unavailable")
+	ErrUpstreamTimeout     = errors.New("upstream service request timeout")
+	ErrClientCanceled      = errors.New("client canceled request")
+)
 
 type Client struct {
 	conn   *grpc.ClientConn
@@ -68,6 +74,12 @@ func (c *Client) Echo(ctx context.Context, params EchoParams) (EchoResult, error
 
 	resp, err := c.client.Echo(ctx, req)
 	if err != nil {
+		if errors.Is(ctx.Err(), context.Canceled) || status.Code(err) == codes.Canceled {
+			return EchoResult{}, fmt.Errorf("%w: %v", ErrClientCanceled, err)
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) || status.Code(err) == codes.DeadlineExceeded {
+			return EchoResult{}, fmt.Errorf("%w: %v", ErrUpstreamTimeout, err)
+		}
 		return EchoResult{}, fmt.Errorf("%w: %v", ErrUpstreamUnavailable, err)
 	}
 
