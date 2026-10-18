@@ -15,7 +15,7 @@ FluxGate is an edge reverse-proxy and rate-limiting gateway designed for high-co
 * **Dynamic Multi-Tier Configuration ([D7](docs/decisions.md#L31))**: Per-key limit overrides stored in Redis with thread-safe, in-memory TTL caching (10s) to balance dynamic updates with sub-millisecond evaluation.
 * **Startup Integrity Gate ([D17](docs/decisions.md#L75))**: Fails fast if baseline rate-limit rules (`ratelimit:config:default`) are missing.
 * **Synthetic Chaos Injection ([D15](docs/decisions.md#L67))**: Upstream contract supports client-controlled latency and error simulation for fault-tolerance testing.
-* **Interactive Web Dashboard & Control Plane**: Modern React + Vite dashboard featuring an interactive API playground, sliding-window capacity gauge, high-concurrency burst tester, and dynamic Redis policy configurator.
+* **Interactive Web Dashboard & Control Plane**: Modern React + Vite dashboard featuring an interactive API playground, live sliding-window reset countdown timer, custom-quantity burst tester (1-500 requests with progress tracking), slide-out request inspection drawer, and dynamic Redis policy configurator.
 * **First-Class Observability ([D10](docs/decisions.md#L43))**: Native Prometheus metrics exporter (`/metrics`), Grafana dashboard, and Kubernetes-ready liveness (`/health`) and readiness (`/ready`) probes.
 
 ---
@@ -188,6 +188,18 @@ You only need to run **one single command** in your terminal. It builds all micr
    ```
    Open `http://localhost:5173` in your browser.
 
+
+---
+
+## Web Dashboard & Control Plane
+
+The frontend ([`frontend/`](frontend/)) provides a real-time, single-screen control plane running at `http://localhost:5173`:
+
+* **Live Sliding-Window Reset Countdown**: Dynamically parses `X-RateLimit-Reset` and `Retry-After` headers, ticking down remaining seconds in real time until quota restores and auto-replenishing the capacity gauge.
+* **Custom Request Number Burst Tester**: Send any custom quantity of concurrent requests (1 to 500) with instant presets (`5x`, `10x`, `15x`, `20x`, `25x`, `50x`, `100x`), live batch progress tracking (`Sending 3/15...`), and sequential request payload tagging.
+* **Interactive API Playground**: Send single requests to `/api/v1/echo` with customizable API keys (`client-alpha`, `client-vip`, or anonymous) and view formatted JSON responses and latency metrics.
+* **Dynamic Redis Policy Adjuster**: Adjust request limit thresholds and rolling time windows directly in Redis with in-memory TTL synchronization.
+* **Slide-Out Request History Drawer**: Inspect all session requests with status filters (`200 OK`, `429 Rate Limited`, `Errors`), latency metrics, sent payloads, and reset timestamps.
 
 ---
 

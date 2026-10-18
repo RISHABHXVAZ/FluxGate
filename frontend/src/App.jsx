@@ -28,10 +28,12 @@ export default function App() {
   const [policyFeedback, setPolicyFeedback] = useState(null);
   const [isSavingPolicy, setIsSavingPolicy] = useState(false);
   const [burstCount, setBurstCount] = useState(10);
+  const [burstProgress, setBurstProgress] = useState(0);
 
   // Response, Quota & System State
   const [response, setResponse] = useState(null);
   const [quota, setQuota] = useState({ limit: 10, remaining: 10, reset: 0, retryAfter: 0 });
+  const [secondsUntilReset, setSecondsUntilReset] = useState(0);
   const [history, setHistory] = useState([]);
   const [health, setHealth] = useState({ gateway: 'UP', redis: 'READY' });
 
@@ -57,6 +59,33 @@ export default function App() {
       setHealth({ gateway: 'DOWN', redis: 'DOWN' });
     }
   };
+
+  // Live countdown timer for rate limit window reset
+  useEffect(() => {
+    const updateCountdown = () => {
+      if (quota.reset > 0) {
+        const nowSec = Math.floor(Date.now() / 1000);
+        const diff = Math.max(0, quota.reset - nowSec);
+        setSecondsUntilReset(diff);
+
+        // When the sliding window has rolled past all recorded timestamps, auto-restore quota
+        if (diff === 0 && quota.remaining < quota.limit) {
+          setQuota(prev => ({
+            ...prev,
+            remaining: prev.limit,
+            retryAfter: 0,
+            reset: 0
+          }));
+        }
+      } else {
+        setSecondsUntilReset(0);
+      }
+    };
+
+    updateCountdown();
+    const timer = setInterval(updateCountdown, 500);
+    return () => clearInterval(timer);
+  }, [quota.reset, quota.remaining, quota.limit]);
 
   useEffect(() => {
     checkHealth();
@@ -154,12 +183,15 @@ export default function App() {
         body = { error: 'Failed to parse JSON response' };
       }
 
+      const resetVal = resetH ? parseInt(resetH, 10) : 0;
+      const retryVal = retryAfterH ? parseInt(retryAfterH, 10) : 0;
+
       if (limitH) {
         setQuota({
           limit: parseInt(limitH, 10),
           remaining: remainingH !== null ? parseInt(remainingH, 10) : 0,
-          reset: resetH ? parseInt(resetH, 10) : 0,
-          retryAfter: retryAfterH ? parseInt(retryAfterH, 10) : 0
+          reset: resetVal,
+          retryAfter: retryVal
         });
       }
 
@@ -173,7 +205,8 @@ export default function App() {
         elapsed,
         remaining: remainingH ?? '-',
         limit: limitH ?? '-',
-        retryAfter: retryAfterH,
+        reset: resetVal,
+        retryAfter: retryVal > 0 ? retryVal : null,
         body
       };
 
@@ -191,37 +224,45 @@ export default function App() {
     }
   };
 
-  // Test rate limiting by sending a burst of requests
+  // Test rate limiting by sending a custom number of burst requests
   const handleBurstTest = async () => {
     if (isBursting) return;
+    const count = Math.max(1, Math.min(500, Number(burstCount) || 10));
     setIsBursting(true);
-    const count = Number(burstCount) || 10;
+    setBurstProgress(0);
 
     for (let i = 1; i <= count; i++) {
+      setBurstProgress(i);
       const start = performance.now();
       const headers = { 'Content-Type': 'application/json' };
       if (apiKey.trim()) headers['X-API-Key'] = apiKey.trim();
+
+      const reqMessage = `${message.trim() || 'Request'} #${i}`;
 
       try {
         const res = await fetch(`${getGatewayUrl()}/api/v1/echo`, {
           method: 'POST',
           headers,
-          body: JSON.stringify({ message: `Burst #${i}` })
+          body: JSON.stringify({ message: reqMessage })
         });
         const elapsed = Math.round(performance.now() - start);
         const remH = res.headers.get('X-RateLimit-Remaining');
         const limH = res.headers.get('X-RateLimit-Limit');
+        const resetH = res.headers.get('X-RateLimit-Reset');
         const retryAfterH = res.headers.get('Retry-After');
 
         let body = {};
         try { body = await res.json(); } catch {}
 
+        const resetVal = resetH ? parseInt(resetH, 10) : 0;
+        const retryVal = retryAfterH ? parseInt(retryAfterH, 10) : 0;
+
         if (limH) {
           setQuota({
             limit: parseInt(limH, 10),
             remaining: remH !== null ? parseInt(remH, 10) : 0,
-            reset: 0,
-            retryAfter: retryAfterH ? parseInt(retryAfterH, 10) : 0
+            reset: resetVal,
+            retryAfter: retryVal
           });
         }
 
@@ -229,13 +270,14 @@ export default function App() {
           id: Math.random().toString(36).substring(7),
           time: new Date().toLocaleTimeString(),
           apiKey: apiKey.trim() || '(No Key)',
-          payload: { message: `Burst #${i}` },
+          payload: { message: reqMessage },
           status: res.status,
           statusText: res.statusText,
           elapsed,
           remaining: remH ?? '-',
           limit: limH ?? '-',
-          retryAfter: retryAfterH,
+          reset: resetVal,
+          retryAfter: retryVal > 0 ? retryVal : null,
           body
         };
 
@@ -244,10 +286,11 @@ export default function App() {
       } catch (err) {
         // network issue
       }
-      await new Promise(r => setTimeout(r, 40));
+      await new Promise(r => setTimeout(r, 35));
     }
 
     setIsBursting(false);
+    setBurstProgress(0);
   };
 
   const filteredHistory = history.filter(item => {
@@ -378,31 +421,78 @@ export default function App() {
                   <span>Send Single Request</span>
                 </button>
 
-                {/* Adjustable Burst Trigger */}
-                <div className="flex items-center gap-2">
-                  <div className="flex-1">
+                {/* Custom Number of Requests & Burst Trigger */}
+                <div className="pt-2 border-t border-white/5 space-y-2.5">
+                  <div className="flex items-center justify-between text-xs text-slate-400">
+                    <label className="flex items-center gap-1.5 font-medium text-slate-300">
+                      <Flame className="h-3.5 w-3.5 text-amber-400" />
+                      Send Custom No. of Requests:
+                    </label>
+                    <span className="text-[11px] font-mono text-slate-500">
+                      {isBursting ? `Progress: ${burstProgress}/${burstCount}` : 'Max: 500'}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <div className="relative w-28 sm:w-32 shrink-0">
+                      <input
+                        type="number"
+                        min="1"
+                        max="500"
+                        value={burstCount}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setBurstCount(val === '' ? '' : Math.max(1, Math.min(500, parseInt(val, 10) || 1)));
+                        }}
+                        disabled={isLoading || isBursting}
+                        className="w-full pl-3 pr-8 py-2 rounded-xl bg-slate-950 border border-white/10 text-white font-mono text-xs focus:outline-none focus:border-amber-500 transition"
+                        placeholder="10"
+                        title="Type custom number of requests to send (1-500)"
+                      />
+                      <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-slate-500 font-mono pointer-events-none">
+                        reqs
+                      </span>
+                    </div>
+
                     <button
                       onClick={handleBurstTest}
-                      disabled={isLoading || isBursting}
-                      className="w-full py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium transition border border-white/10 flex items-center justify-center gap-2 disabled:opacity-50"
+                      disabled={isLoading || isBursting || !burstCount || Number(burstCount) < 1}
+                      className="flex-1 py-2 px-3 rounded-xl bg-amber-600/90 hover:bg-amber-600 text-white text-xs font-semibold transition border border-amber-500/30 shadow-md shadow-amber-500/10 flex items-center justify-center gap-2 disabled:opacity-50"
+                      title="Send custom number of requests in rapid succession"
                     >
-                      {isBursting ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Flame className="h-3.5 w-3.5 text-amber-400" />}
-                      <span>Trigger Burst ({burstCount} Requests)</span>
+                      {isBursting ? (
+                        <>
+                          <RefreshCw className="h-3.5 w-3.5 animate-spin text-amber-200" />
+                          <span>Sending ({burstProgress}/{burstCount})...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Flame className="h-3.5 w-3.5 text-amber-200" />
+                          <span>Send {Number(burstCount) || 1} Requests</span>
+                        </>
+                      )}
                     </button>
                   </div>
-                  <select
-                    value={burstCount}
-                    onChange={(e) => setBurstCount(Number(e.target.value))}
-                    disabled={isLoading || isBursting}
-                    className="px-2.5 py-2 rounded-xl bg-slate-800 border border-white/10 text-xs text-white font-mono focus:outline-none focus:border-blue-500"
-                    title="Number of burst requests to fire"
-                  >
-                    <option value="5">5x</option>
-                    <option value="10">10x</option>
-                    <option value="15">15x</option>
-                    <option value="20">20x</option>
-                    <option value="30">30x</option>
-                  </select>
+
+                  {/* Quick Preset Chips */}
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-[10px] text-slate-500 font-mono">Presets:</span>
+                    {[5, 10, 15, 20, 25, 50, 100].map(val => (
+                      <button
+                        key={val}
+                        type="button"
+                        onClick={() => setBurstCount(val)}
+                        disabled={isLoading || isBursting}
+                        className={`text-[10px] px-2 py-0.5 rounded font-mono transition ${
+                          Number(burstCount) === val
+                            ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 font-bold'
+                            : 'bg-slate-800 text-slate-400 hover:text-white hover:bg-slate-700'
+                        }`}
+                      >
+                        {val}x
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
             </div>
@@ -503,13 +593,13 @@ export default function App() {
           <div className="space-y-6">
             
             {/* Quota Indicator Card */}
-            <div className="bg-slate-900/60 border border-white/10 rounded-2xl p-6 shadow-xl space-y-3">
+            <div className="bg-slate-900/60 border border-white/10 rounded-2xl p-6 shadow-xl space-y-3.5">
               <div className="flex justify-between items-center">
-                <span className="text-xs uppercase tracking-wider text-slate-400 font-semibold">
+                <span className="text-xs uppercase tracking-wider text-slate-400 font-semibold flex items-center gap-1.5">
                   Sliding Window Quota
                 </span>
                 <span className="font-mono text-xs text-slate-300">
-                  {quota.remaining} / {quota.limit} remaining
+                  <span className="text-white font-bold">{quota.remaining}</span> / {quota.limit} remaining
                 </span>
               </div>
 
@@ -523,11 +613,45 @@ export default function App() {
                 />
               </div>
 
-              {/* Status explanation */}
-              <div className="flex justify-between text-[11px] text-slate-400 font-mono">
-                <span>Active Window: {policyWindowSec}s</span>
-                <span>Reset: {quota.retryAfter > 0 ? `Penalty (${quota.retryAfter}s)` : 'Ready'}</span>
+              {/* Live Sliding-Window Reset Time & Status */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-1 text-[11px] font-mono border-t border-white/5">
+                <span className="text-slate-400 flex items-center gap-1">
+                  Active Window: <strong className="text-slate-200">{policyWindowSec}s</strong>
+                </span>
+
+                <div className="flex items-center gap-1.5">
+                  <Clock className="h-3 w-3 text-cyan-400" />
+                  <span className="text-slate-400">Reset:</span>
+                  {secondsUntilReset > 0 ? (
+                    <span className="flex items-center gap-1.5 text-cyan-300 font-semibold px-2 py-0.5 rounded bg-cyan-500/10 border border-cyan-500/20">
+                      <span className="h-1.5 w-1.5 rounded-full bg-cyan-400 animate-pulse" />
+                      in {secondsUntilReset}s
+                      {quota.reset > 0 && (
+                        <span className="text-cyan-500/80 text-[10px]">
+                          ({new Date(quota.reset * 1000).toLocaleTimeString()})
+                        </span>
+                      )}
+                    </span>
+                  ) : (
+                    <span className="text-emerald-400 flex items-center gap-1 font-medium">
+                      <CheckCircle2 className="h-3 w-3" /> Ready (Full Window)
+                    </span>
+                  )}
+                </div>
               </div>
+
+              {/* Live Cooldown / Rate-Limit Rejection Alert */}
+              {secondsUntilReset > 0 && quota.remaining === 0 && (
+                <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-between text-xs font-mono text-amber-300 animate-pulse">
+                  <div className="flex items-center gap-2">
+                    <Flame className="h-4 w-4 text-amber-400" />
+                    <span>Rate limit reached. Quota restores in:</span>
+                  </div>
+                  <span className="font-bold text-amber-400 bg-amber-500/20 px-2 py-0.5 rounded">
+                    {secondsUntilReset}s
+                  </span>
+                </div>
+              )}
             </div>
 
             {/* Last Response Card */}
@@ -549,6 +673,24 @@ export default function App() {
                   </span>
                 )}
               </div>
+
+              {/* Live Response Header Details */}
+              {response && response.status !== 0 && (
+                <div className="flex items-center justify-between px-3 py-1.5 bg-slate-950/80 rounded-xl border border-white/5 text-[11px] font-mono">
+                  <span className="text-slate-400">
+                    Remaining: <span className="text-slate-200 font-semibold">{quota.remaining}</span>/{quota.limit}
+                  </span>
+                  <span className="text-slate-400 flex items-center gap-1.5">
+                    <Clock className="h-3 w-3 text-cyan-400" />
+                    Reset:{' '}
+                    {secondsUntilReset > 0 ? (
+                      <span className="text-cyan-400 font-semibold">{secondsUntilReset}s</span>
+                    ) : (
+                      <span className="text-emerald-400 font-medium">Ready</span>
+                    )}
+                  </span>
+                </div>
+              )}
 
               {/* Formatted response body */}
               <pre className="p-3.5 rounded-xl bg-slate-950 border border-white/10 font-mono text-xs text-slate-200 overflow-x-auto max-h-56 leading-relaxed">
@@ -695,9 +837,16 @@ export default function App() {
                 {/* Sub-details */}
                 <div className="flex justify-between items-center mt-2 pt-2 border-t border-white/5 text-[11px] text-slate-400">
                   <span>Quota Left: {item.remaining} / {item.limit}</span>
-                  {item.retryAfter && (
-                    <span className="text-rose-400">Penalty: {item.retryAfter}s</span>
-                  )}
+                  <div className="flex items-center gap-2">
+                    {item.reset > 0 && (
+                      <span className="text-slate-500 text-[10px]">
+                        Reset: {new Date(item.reset * 1000).toLocaleTimeString()}
+                      </span>
+                    )}
+                    {item.retryAfter && (
+                      <span className="text-rose-400 font-semibold">Penalty: {item.retryAfter}s</span>
+                    )}
+                  </div>
                 </div>
 
                 {/* Expanded Details */}
