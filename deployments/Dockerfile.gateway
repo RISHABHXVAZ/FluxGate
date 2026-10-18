@@ -7,7 +7,10 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /app/bin/gateway ./cmd/gateway
 
 FROM alpine:3.20
 WORKDIR /app
+RUN adduser -D -u 10001 nonroot
 COPY --from=builder /app/bin/gateway .
 COPY scripts/lua/ ./scripts/lua/
+RUN chown -R nonroot:nonroot /app
+USER nonroot
 EXPOSE 8080
 CMD ["./gateway"]

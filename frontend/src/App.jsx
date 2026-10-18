@@ -69,7 +69,9 @@ export default function App() {
     const targetKey = key.trim() || 'default';
     const base = getGatewayUrl();
     try {
-      const res = await fetch(`${base}/api/v1/config?key=${encodeURIComponent(targetKey)}`);
+      const res = await fetch(`${base}/api/v1/config?key=${encodeURIComponent(targetKey)}`, {
+        headers: { 'X-Admin-Key': 'fluxgate-admin-secret' }
+      });
       if (res.ok) {
         const data = await res.json();
         setPolicyLimit(data.limit);
@@ -96,7 +98,10 @@ export default function App() {
     try {
       const res = await fetch(`${base}/api/v1/config`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Admin-Key': 'fluxgate-admin-secret'
+        },
         body: JSON.stringify({
           key: targetKey,
           limit: Number(policyLimit),

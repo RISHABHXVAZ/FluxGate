@@ -7,6 +7,9 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /app/bin/backend ./cmd/backend
 
 FROM alpine:3.20
 WORKDIR /app
+RUN adduser -D -u 10001 nonroot
 COPY --from=builder /app/bin/backend .
+RUN chown -R nonroot:nonroot /app
+USER nonroot
 EXPOSE 50051
 CMD ["./backend"]
