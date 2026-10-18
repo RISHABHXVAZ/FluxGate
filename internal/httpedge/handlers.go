@@ -21,23 +21,30 @@ const (
 )
 
 type Handler struct {
-	upstreamClient *upstream.Client
-	pingRedis      func(ctx context.Context) error
-	cfgMgr         *config.Manager
-	adminKey       string
+	upstreamClient  *upstream.Client
+	pingRedis       func(ctx context.Context) error
+	cfgMgr          *config.Manager
+	adminKey        string
+	upstreamTimeout time.Duration
 }
 
-func NewHandler(upstreamClient *upstream.Client, pingRedis func(ctx context.Context) error, cfgMgr *config.Manager) *Handler {
+func NewHandler(upstreamClient *upstream.Client, pingRedis func(ctx context.Context) error, cfgMgr *config.Manager, upstreamTimeout ...time.Duration) *Handler {
 	adminKey := os.Getenv("ADMIN_API_KEY")
 	if adminKey == "" {
 		adminKey = "fluxgate-admin-secret"
 	}
 
+	timeout := 2 * time.Second
+	if len(upstreamTimeout) > 0 && upstreamTimeout[0] > 0 {
+		timeout = upstreamTimeout[0]
+	}
+
 	return &Handler{
-		upstreamClient: upstreamClient,
-		pingRedis:      pingRedis,
-		cfgMgr:         cfgMgr,
-		adminKey:       adminKey,
+		upstreamClient:  upstreamClient,
+		pingRedis:       pingRedis,
+		cfgMgr:          cfgMgr,
+		adminKey:        adminKey,
+		upstreamTimeout: timeout,
 	}
 }
 
@@ -123,8 +130,12 @@ func (h *Handler) HandleEcho(w http.ResponseWriter, r *http.Request) {
 		requestID = fmt.Sprintf("req-%d", time.Now().UnixNano())
 	}
 
-	// Dispatch to upstream backend via gRPC (D6)
-	res, err := h.upstreamClient.Echo(r.Context(), upstream.EchoParams{
+	// Create bounded context for upstream call (D20)
+	callCtx, cancel := context.WithTimeout(r.Context(), h.upstreamTimeout)
+	defer cancel()
+
+	// Dispatch to upstream backend via gRPC (D6, D20)
+	res, err := h.upstreamClient.Echo(callCtx, upstream.EchoParams{
 		Message:         reqBody.Message,
 		RequestID:       requestID,
 		InjectLatencyMs: reqBody.InjectLatencyMs,
@@ -132,8 +143,33 @@ func (h *Handler) HandleEcho(w http.ResponseWriter, r *http.Request) {
 		InjectErrorCode: reqBody.InjectErrorCode,
 	})
 	if err != nil {
-		// Backend unavailable or error returned -> 502 Bad Gateway (D16)
 		w.Header().Set("Content-Type", "application/json")
+
+		// 1. Client-request cancellation: do not misreport as upstream timeout
+		if r.Context().Err() != nil || errors.Is(err, upstream.ErrClientCanceled) {
+			w.WriteHeader(499)
+			_ = json.NewEncoder(w).Encode(ratelimit.ErrorEnvelope{
+				Error: ratelimit.ErrorBody{
+					Code:    "CLIENT_CLOSED_REQUEST",
+					Message: "Client closed the request.",
+				},
+			})
+			return
+		}
+
+		// 2. Upstream deadline exceeded -> 504 Gateway Timeout (D20)
+		if errors.Is(err, upstream.ErrUpstreamTimeout) {
+			w.WriteHeader(http.StatusGatewayTimeout)
+			_ = json.NewEncoder(w).Encode(ratelimit.ErrorEnvelope{
+				Error: ratelimit.ErrorBody{
+					Code:    "UPSTREAM_TIMEOUT",
+					Message: "The upstream service timed out.",
+				},
+			})
+			return
+		}
+
+		// 3. Backend unavailable or error returned -> 502 Bad Gateway (D16)
 		w.WriteHeader(http.StatusBadGateway)
 		_ = json.NewEncoder(w).Encode(ratelimit.ErrorEnvelope{
 			Error: ratelimit.ErrorBody{
