@@ -84,7 +84,3 @@ This document tracks foundational architecture and design decisions (D1 through 
 ### D19: Reset Header Fallback
 * **Decision:** If `oldest_score_ms == -1` (e.g. empty window or edge state), `X-RateLimit-Reset` defaults to current epoch seconds.
 * **Details:** Ensures deterministic, well-formed rate-limit headers are always returned to clients even when no previous requests remain in the window.
-
-### D20: Upstream Timeout & HTTP 504 Mapping
-* **Decision:** Upstream deadline expiration returns HTTP `504 Gateway Timeout` with code `UPSTREAM_TIMEOUT`, distinct from client cancellations (HTTP `499`) and upstream errors (HTTP `502`).
-* **Details:** The gateway bounds every upstream gRPC call with a configurable context timeout (`UPSTREAM_TIMEOUT`, defaulting to 2s). If the context deadline expires while the client request is still active, the gateway returns HTTP 504. Client-initiated cancellations are respected and never misreported as upstream timeouts.

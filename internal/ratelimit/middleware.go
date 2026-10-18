@@ -3,6 +3,7 @@ package ratelimit
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"net/http"
 	"strconv"
@@ -43,13 +44,30 @@ const (
 	ContextKeyAPIKey contextKey = "apiKey"
 )
 
+// sanitizeMetricKey bounds Prometheus metric label cardinality to prevent memory exhaustion DoS
+func sanitizeMetricKey(key string) string {
+	switch key {
+	case "client-alpha", "client-vip", "default", "anonymous", "invalid":
+		return key
+	default:
+		return "custom"
+	}
+}
+
 func (mw *RateLimitMiddleware) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
-		// 1. Identity extraction (D1, D14)
+		// 1. Identity extraction & validation (D1, D14)
 		key, err := apikey.Extract(r)
 		if err != nil {
+			if errors.Is(err, apikey.ErrAPIKeyInvalid) {
+				mw.metrics.RequestsTotal.WithLabelValues("rejected_invalid_key", "invalid").Inc()
+				mw.metrics.RequestDuration.WithLabelValues("rejected_invalid_key").Observe(time.Since(start).Seconds())
+				writeJSONError(w, http.StatusBadRequest, "INVALID_API_KEY", "API key contains invalid characters or exceeds 128 characters", 0)
+				return
+			}
+
 			mw.metrics.RequestsTotal.WithLabelValues("rejected_missing_key", "anonymous").Inc()
 			mw.metrics.RequestDuration.WithLabelValues("rejected_missing_key").Observe(time.Since(start).Seconds())
 
@@ -58,12 +76,13 @@ func (mw *RateLimitMiddleware) Wrap(next http.Handler) http.Handler {
 		}
 
 		ctx := r.Context()
+		metricKey := sanitizeMetricKey(key)
 
 		// 2. Resolve configured dynamic limit for this key (D7)
 		rule, err := mw.cfgMgr.GetRule(ctx, key)
 		if err != nil {
 			// Failed to read Redis config -> fail-closed (D3, D12)
-			mw.metrics.RequestsTotal.WithLabelValues("rejected_redis_error", key).Inc()
+			mw.metrics.RequestsTotal.WithLabelValues("rejected_redis_error", metricKey).Inc()
 			mw.metrics.RequestDuration.WithLabelValues("rejected_redis_error").Observe(time.Since(start).Seconds())
 
 			writeJSONError(w, http.StatusServiceUnavailable, "RATE_LIMIT_SERVICE_UNAVAILABLE", "Unable to verify rate limit at this time. Please retry shortly.", 0)
@@ -78,7 +97,7 @@ func (mw *RateLimitMiddleware) Wrap(next http.Handler) http.Handler {
 		if err != nil {
 			// Redis failure/timeout -> fail-closed with 503 (D3, D12)
 			mw.metrics.RedisCallDuration.WithLabelValues("error").Observe(redisDuration)
-			mw.metrics.RequestsTotal.WithLabelValues("rejected_redis_error", key).Inc()
+			mw.metrics.RequestsTotal.WithLabelValues("rejected_redis_error", metricKey).Inc()
 			mw.metrics.RequestDuration.WithLabelValues("rejected_redis_error").Observe(time.Since(start).Seconds())
 
 			writeJSONError(w, http.StatusServiceUnavailable, "RATE_LIMIT_SERVICE_UNAVAILABLE", "Unable to verify rate limit at this time. Please retry shortly.", 0)
@@ -115,7 +134,7 @@ func (mw *RateLimitMiddleware) Wrap(next http.Handler) http.Handler {
 		if result.Outcome == Rejected {
 			w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds))
 
-			mw.metrics.RequestsTotal.WithLabelValues("rejected_limit", key).Inc()
+			mw.metrics.RequestsTotal.WithLabelValues("rejected_limit", metricKey).Inc()
 			mw.metrics.RequestDuration.WithLabelValues("rejected_limit").Observe(time.Since(start).Seconds())
 
 			writeJSONError(w, http.StatusTooManyRequests, "RATE_LIMIT_EXCEEDED", "Rate limit exceeded. Please slow down.", retryAfterSeconds)
@@ -123,7 +142,7 @@ func (mw *RateLimitMiddleware) Wrap(next http.Handler) http.Handler {
 		}
 
 		// Allowed Path
-		mw.metrics.RequestsTotal.WithLabelValues("allowed", key).Inc()
+		mw.metrics.RequestsTotal.WithLabelValues("allowed", metricKey).Inc()
 		ctxWithKey := context.WithValue(ctx, ContextKeyAPIKey, key)
 		next.ServeHTTP(w, r.WithContext(ctxWithKey))
 		mw.metrics.RequestDuration.WithLabelValues("allowed").Observe(time.Since(start).Seconds())

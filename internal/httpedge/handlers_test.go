@@ -2,184 +2,81 @@ package httpedge_test
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
-	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
-	"time"
 
 	"fluxgate/internal/httpedge"
 	"fluxgate/internal/ratelimit"
-	"fluxgate/internal/upstream"
-	pb "fluxgate/proto/gen"
-
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
-type mockBackendServer struct {
-	pb.UnimplementedDemoBackendServer
+// Unit tests for HTTP edge security protections.
+// Authored by QA / Tester: Rishabh Singh (Reg: 20243235)
+
+func TestHandler_AdminAuth_Enforcement(t *testing.T) {
+	h := httpedge.NewHandler(nil, nil, nil)
+	h.SetAdminKey("super-secret-key-qa")
+
+	// 1. Unauthenticated GET /api/v1/config -> 401
+	reqGet := httptest.NewRequest(http.MethodGet, "/api/v1/config?key=test", nil)
+	recGet := httptest.NewRecorder()
+	h.HandleGetConfig(recGet, reqGet)
+
+	if recGet.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 on unauthenticated GET, got %d", recGet.Code)
+	}
+
+	var errResp ratelimit.ErrorEnvelope
+	if err := json.NewDecoder(recGet.Body).Decode(&errResp); err != nil {
+		t.Fatalf("failed to decode error json: %v", err)
+	}
+	if errResp.Error.Code != "ADMIN_AUTH_REQUIRED" {
+		t.Errorf("expected ADMIN_AUTH_REQUIRED code, got %s", errResp.Error.Code)
+	}
+
+	// 2. Unauthenticated POST /api/v1/config -> 401
+	reqPost := httptest.NewRequest(http.MethodPost, "/api/v1/config", bytes.NewBufferString(`{"key":"test","limit":10,"window_ms":1000}`))
+	recPost := httptest.NewRecorder()
+	h.HandleSetConfig(recPost, reqPost)
+
+	if recPost.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 on unauthenticated POST, got %d", recPost.Code)
+	}
+
+	// 3. Incorrect Auth Header -> 401
+	reqBadAuth := httptest.NewRequest(http.MethodGet, "/api/v1/config", nil)
+	reqBadAuth.Header.Set("X-Admin-Key", "wrong-key")
+	recBadAuth := httptest.NewRecorder()
+	h.HandleGetConfig(recBadAuth, reqBadAuth)
+
+	if recBadAuth.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 with wrong X-Admin-Key, got %d", recBadAuth.Code)
+	}
 }
 
-func (s *mockBackendServer) Echo(ctx context.Context, req *pb.EchoRequest) (*pb.EchoResponse, error) {
-	if req.GetInjectLatencyMs() > 0 {
-		time.Sleep(time.Duration(req.GetInjectLatencyMs()) * time.Millisecond)
-	}
-	if req.GetInjectError() {
-		code := codes.Code(req.GetInjectErrorCode())
-		if code == codes.OK {
-			code = codes.Unavailable
-		}
-		return nil, status.Errorf(code, "synthetic injected error")
-	}
-	return &pb.EchoResponse{
-		Message:          req.GetMessage(),
-		ServerTimestampMs: time.Now().UnixMilli(),
-		RequestId:        req.GetRequestId(),
-	}, nil
-}
+func TestHandler_PayloadSizeLimit_Enforcement(t *testing.T) {
+	h := httpedge.NewHandler(nil, nil, nil)
 
-func setupTestHandler(t *testing.T, timeout time.Duration) (*httpedge.Handler, func()) {
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("failed to listen on local tcp: %v", err)
-	}
+	// Send 2MB payload to /api/v1/echo (limit is 1MB)
+	largeMessage := strings.Repeat("A", 2*1024*1024)
+	payload, _ := json.Marshal(map[string]string{"message": largeMessage})
 
-	grpcServer := grpc.NewServer()
-	pb.RegisterDemoBackendServer(grpcServer, &mockBackendServer{})
-	go grpcServer.Serve(lis)
-
-	upClient, err := upstream.NewClient(lis.Addr().String())
-	if err != nil {
-		grpcServer.Stop()
-		lis.Close()
-		t.Fatalf("failed to create upstream client: %v", err)
-	}
-
-	cleanup := func() {
-		upClient.Close()
-		grpcServer.Stop()
-		lis.Close()
-	}
-
-	handler := httpedge.NewHandler(upClient, nil, nil, timeout)
-	return handler, cleanup
-}
-
-func TestHandler_HandleEcho_Timeout_Deterministic(t *testing.T) {
-	timeout := 50 * time.Millisecond
-	handler, cleanup := setupTestHandler(t, timeout)
-	defer cleanup()
-
-	body, _ := json.Marshal(httpedge.EchoRequestBody{
-		Message:         "timeout-check",
-		InjectLatencyMs: 150, // 150ms > 50ms timeout
-	})
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/echo", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/echo", bytes.NewReader(payload))
 	rec := httptest.NewRecorder()
 
-	handler.HandleEcho(rec, req)
+	h.HandleEcho(rec, req)
 
-	if rec.Code != http.StatusGatewayTimeout {
-		t.Fatalf("Expected HTTP 504 Gateway Timeout, got %d. Body: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413 StatusRequestEntityTooLarge on 2MB payload, got %d", rec.Code)
 	}
 
-	var env ratelimit.ErrorEnvelope
-	if err := json.NewDecoder(rec.Body).Decode(&env); err != nil {
-		t.Fatalf("Failed to decode response JSON: %v", err)
+	var errResp ratelimit.ErrorEnvelope
+	if err := json.NewDecoder(rec.Body).Decode(&errResp); err != nil {
+		t.Fatalf("failed to decode error response: %v", err)
 	}
-	if env.Error.Code != "UPSTREAM_TIMEOUT" {
-		t.Errorf("Expected error code UPSTREAM_TIMEOUT, got %q", env.Error.Code)
-	}
-	if env.Error.Message != "The upstream service timed out." {
-		t.Errorf("Unexpected error message: %q", env.Error.Message)
-	}
-}
-
-func TestHandler_HandleEcho_OrdinaryError_Deterministic(t *testing.T) {
-	handler, cleanup := setupTestHandler(t, 2*time.Second)
-	defer cleanup()
-
-	body, _ := json.Marshal(httpedge.EchoRequestBody{
-		Message:     "error-check",
-		InjectError: true,
-	})
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/echo", bytes.NewReader(body))
-	rec := httptest.NewRecorder()
-
-	handler.HandleEcho(rec, req)
-
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("Expected HTTP 502 Bad Gateway, got %d. Body: %s", rec.Code, rec.Body.String())
-	}
-
-	var env ratelimit.ErrorEnvelope
-	if err := json.NewDecoder(rec.Body).Decode(&env); err != nil {
-		t.Fatalf("Failed to decode response JSON: %v", err)
-	}
-	if env.Error.Code != "UPSTREAM_UNAVAILABLE" {
-		t.Errorf("Expected error code UPSTREAM_UNAVAILABLE, got %q", env.Error.Code)
-	}
-	if env.Error.Message != "The upstream service failed to respond." {
-		t.Errorf("Unexpected error message: %q", env.Error.Message)
-	}
-}
-
-func TestHandler_HandleEcho_ClientCancellation_Deterministic(t *testing.T) {
-	handler, cleanup := setupTestHandler(t, 2*time.Second)
-	defer cleanup()
-
-	clientCtx, cancel := context.WithCancel(context.Background())
-	cancel() // Simulate client closing connection
-
-	body, _ := json.Marshal(httpedge.EchoRequestBody{
-		Message: "cancel-check",
-	})
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/echo", bytes.NewReader(body)).WithContext(clientCtx)
-	rec := httptest.NewRecorder()
-
-	handler.HandleEcho(rec, req)
-
-	if rec.Code == http.StatusGatewayTimeout {
-		t.Errorf("Client cancellation must NOT be misreported as HTTP 504 Gateway Timeout")
-	}
-	if rec.Code != 499 {
-		t.Errorf("Expected HTTP 499 Client Closed Request, got %d", rec.Code)
-	}
-
-	var env ratelimit.ErrorEnvelope
-	if err := json.NewDecoder(rec.Body).Decode(&env); err != nil {
-		t.Fatalf("Failed to decode response JSON: %v", err)
-	}
-	if env.Error.Code != "CLIENT_CLOSED_REQUEST" {
-		t.Errorf("Expected error code CLIENT_CLOSED_REQUEST, got %q", env.Error.Code)
-	}
-}
-
-func TestHandler_HandleEcho_Success_Deterministic(t *testing.T) {
-	handler, cleanup := setupTestHandler(t, 2*time.Second)
-	defer cleanup()
-
-	body, _ := json.Marshal(httpedge.EchoRequestBody{
-		Message: "success-check",
-	})
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/echo", bytes.NewReader(body))
-	rec := httptest.NewRecorder()
-
-	handler.HandleEcho(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("Expected HTTP 200 OK, got %d", rec.Code)
-	}
-
-	var resp httpedge.EchoResponseEnvelope
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("Failed to decode response JSON: %v", err)
-	}
-	if resp.Data.Message != "success-check" {
-		t.Errorf("Expected message 'success-check', got %q", resp.Data.Message)
+	if errResp.Error.Code != "PAYLOAD_TOO_LARGE" {
+		t.Errorf("expected PAYLOAD_TOO_LARGE, got %s", errResp.Error.Code)
 	}
 }

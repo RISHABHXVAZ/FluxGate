@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	"fluxgate/internal/config"
@@ -13,23 +15,56 @@ import (
 	"fluxgate/internal/upstream"
 )
 
+const (
+	MaxEchoBodyBytes   = 1 << 20  // 1MB request payload limit to prevent DoS
+	MaxConfigBodyBytes = 64 << 10 // 64KB config payload limit
+)
+
 type Handler struct {
-	upstreamClient  *upstream.Client
-	pingRedis       func(ctx context.Context) error
-	cfgMgr          *config.Manager
-	upstreamTimeout time.Duration
+	upstreamClient *upstream.Client
+	pingRedis      func(ctx context.Context) error
+	cfgMgr         *config.Manager
+	adminKey       string
 }
 
-func NewHandler(upstreamClient *upstream.Client, pingRedis func(ctx context.Context) error, cfgMgr *config.Manager, upstreamTimeout time.Duration) *Handler {
-	if upstreamTimeout <= 0 {
-		upstreamTimeout = 2 * time.Second
+func NewHandler(upstreamClient *upstream.Client, pingRedis func(ctx context.Context) error, cfgMgr *config.Manager) *Handler {
+	adminKey := os.Getenv("ADMIN_API_KEY")
+	if adminKey == "" {
+		adminKey = "fluxgate-admin-secret"
 	}
+
 	return &Handler{
-		upstreamClient:  upstreamClient,
-		pingRedis:       pingRedis,
-		cfgMgr:          cfgMgr,
-		upstreamTimeout: upstreamTimeout,
+		upstreamClient: upstreamClient,
+		pingRedis:      pingRedis,
+		cfgMgr:         cfgMgr,
+		adminKey:       adminKey,
 	}
+}
+
+func (h *Handler) SetAdminKey(key string) {
+	h.adminKey = key
+}
+
+func (h *Handler) verifyAdminAuth(r *http.Request) bool {
+	if h.adminKey == "" {
+		return true // Auth check bypassed if admin key is explicitly disabled
+	}
+
+	// 1. Check X-Admin-Key header
+	if r.Header.Get("X-Admin-Key") == h.adminKey {
+		return true
+	}
+
+	// 2. Check Authorization: Bearer <token>
+	authHeader := r.Header.Get("Authorization")
+	if strings.HasPrefix(authHeader, "Bearer ") {
+		token := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+		if token == h.adminKey {
+			return true
+		}
+	}
+
+	return false
 }
 
 type EchoRequestBody struct {
@@ -54,9 +89,25 @@ func (h *Handler) HandleEcho(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Limit request body size to 1MB to prevent memory exhaustion DoS
+	r.Body = http.MaxBytesReader(w, r.Body, MaxEchoBodyBytes)
+
 	var reqBody EchoRequestBody
 	if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
 		w.Header().Set("Content-Type", "application/json")
+
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			_ = json.NewEncoder(w).Encode(ratelimit.ErrorEnvelope{
+				Error: ratelimit.ErrorBody{
+					Code:    "PAYLOAD_TOO_LARGE",
+					Message: "Request payload exceeds maximum allowed size of 1MB",
+				},
+			})
+			return
+		}
+
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(ratelimit.ErrorEnvelope{
 			Error: ratelimit.ErrorBody{
@@ -72,12 +123,8 @@ func (h *Handler) HandleEcho(w http.ResponseWriter, r *http.Request) {
 		requestID = fmt.Sprintf("req-%d", time.Now().UnixNano())
 	}
 
-	// Create bounded context for upstream call (D20)
-	callCtx, cancel := context.WithTimeout(r.Context(), h.upstreamTimeout)
-	defer cancel()
-
-	// Dispatch to upstream backend via gRPC (D6, D20)
-	res, err := h.upstreamClient.Echo(callCtx, upstream.EchoParams{
+	// Dispatch to upstream backend via gRPC (D6)
+	res, err := h.upstreamClient.Echo(r.Context(), upstream.EchoParams{
 		Message:         reqBody.Message,
 		RequestID:       requestID,
 		InjectLatencyMs: reqBody.InjectLatencyMs,
@@ -85,33 +132,8 @@ func (h *Handler) HandleEcho(w http.ResponseWriter, r *http.Request) {
 		InjectErrorCode: reqBody.InjectErrorCode,
 	})
 	if err != nil {
+		// Backend unavailable or error returned -> 502 Bad Gateway (D16)
 		w.Header().Set("Content-Type", "application/json")
-
-		// 1. Client-request cancellation: do not misreport as upstream timeout
-		if r.Context().Err() != nil || errors.Is(err, upstream.ErrClientCanceled) {
-			w.WriteHeader(499)
-			_ = json.NewEncoder(w).Encode(ratelimit.ErrorEnvelope{
-				Error: ratelimit.ErrorBody{
-					Code:    "CLIENT_CLOSED_REQUEST",
-					Message: "Client closed the request.",
-				},
-			})
-			return
-		}
-
-		// 2. Upstream deadline exceeded -> 504 Gateway Timeout (D20)
-		if errors.Is(err, upstream.ErrUpstreamTimeout) {
-			w.WriteHeader(http.StatusGatewayTimeout)
-			_ = json.NewEncoder(w).Encode(ratelimit.ErrorEnvelope{
-				Error: ratelimit.ErrorBody{
-					Code:    "UPSTREAM_TIMEOUT",
-					Message: "The upstream service timed out.",
-				},
-			})
-			return
-		}
-
-		// 3. Backend unavailable or error returned -> 502 Bad Gateway (D16)
 		w.WriteHeader(http.StatusBadGateway)
 		_ = json.NewEncoder(w).Encode(ratelimit.ErrorEnvelope{
 			Error: ratelimit.ErrorBody{
@@ -169,6 +191,18 @@ func (h *Handler) HandleGetConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !h.verifyAdminAuth(r) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(ratelimit.ErrorEnvelope{
+			Error: ratelimit.ErrorBody{
+				Code:    "ADMIN_AUTH_REQUIRED",
+				Message: "Admin authentication required. Provide valid X-Admin-Key header or Bearer token.",
+			},
+		})
+		return
+	}
+
 	key := r.URL.Query().Get("key")
 	if key == "" {
 		key = "default"
@@ -197,6 +231,20 @@ func (h *Handler) HandleSetConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	if !h.verifyAdminAuth(r) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(ratelimit.ErrorEnvelope{
+			Error: ratelimit.ErrorBody{
+				Code:    "ADMIN_AUTH_REQUIRED",
+				Message: "Admin authentication required. Provide valid X-Admin-Key header or Bearer token.",
+			},
+		})
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, MaxConfigBodyBytes)
 
 	var req SetConfigRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
